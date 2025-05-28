@@ -6,17 +6,17 @@ from threading import Thread
 
 
 
-def select_file():
-    def select_file(entry_widget, preview_label):
-        file_path = filedialog.askopenfilename()
-        if file_path:
+
+def select_file(entry_widget, preview_label):
+    file_path = filedialog.askopenfilename()
+    if file_path:
             entry_widget.delete(0, tk.END)
             entry_widget.insert(0, file_path)
         
         # Show file info preview
-        file_name = os.path.basename(file_path)
-        file_size = round(os.path.getsize(file_path) / (1024*1024), 2)  # MB
-        preview_label.config(
+    file_name = os.path.basename(file_path)
+    file_size = round(os.path.getsize(file_path) / (1024*1024), 2)  # MB
+    preview_label.config(
             text=f"Selected: {file_name}\nSize: {file_size} MB",
             fg="green"
         )
@@ -153,40 +153,24 @@ def chunk_to_packet(seq_num, chunk):
 def packet_to_chunk(packet):
     pass
 
-def setup_gui(self):
-    tk.Label(self.window, text="File:").grid(row=0, column=0)
-    self.entry_file = tk.Entry(self.window, width=40)
-    self.entry_file.grid(row=0, column=1)
-    tk.Button(self.window, text="Browse", command=self.browse_file).grid(row=0, column=2)
-    
-    tk.Label(self.window, text="Receiver IP:").grid(row=1, column=0)
-    self.entry_ip = tk.Entry(self.window)
-    self.entry_ip.grid(row=1, column=1)
-    self.entry_ip.insert(0, "127.0.0.1")
-    
-    tk.Label(self.window, text="Port:").grid(row=2, column=0)
-    self.entry_port = tk.Entry(self.window)
-    self.entry_port.grid(row=2, column=1)
-    self.entry_port.insert(0, "5000")
-    
-    self.status_label = tk.Label(self.window, text="Ready")
-    self.status_label.grid(row=3, column=0, columnspan=3)
-    
-    tk.Button(self.window, text="Send File", command=self.on_send_click).grid(row=4, column=1)
-    tk.Button(self.window, text="Receive File", command=self.on_receive_click).grid(row=5, column=1)
+
 
 
 class UDPApp:
     
     def __init__(self, window):
         self.window = window
-        self.setup_gui(self)
+        self.window.title("UDP FILE TRANSFER TOOL")
+        self.window.geometry("500x600")
+        #self.window.config("#42f5cb")
+        self.setup_gui()
+
     
     def setup_gui(self):
         tk.Label(self.window, text="File:").grid(row=0, column=0)
         self.entry_file = tk.Entry(self.window, width=40)
         self.entry_file.grid(row=0, column=1)
-        tk.Button(self.window, text="Browse", command=self.browse_file).grid(row=0, column=2)
+        tk.Button(self.window, text="Browse", command=self.select_file).grid(row=0, column=2)
     
         tk.Label(self.window, text="Receiver IP:").grid(row=1, column=0)
         self.entry_ip = tk.Entry(self.window)
@@ -201,8 +185,8 @@ class UDPApp:
         self.status_label = tk.Label(self.window, text="Ready")
         self.status_label.grid(row=3, column=0, columnspan=3)
     
-        tk.Button(self.window, text="Send File", command=self.on_send_click).grid(row=4, column=1)
-        tk.Button(self.window, text="Receive File", command=self.on_receive_click).grid(row=5, column=1)
+        tk.Button(self.window, text="Send File", command=self.send_file).grid(row=4, column=1)
+        tk.Button(self.window, text="Receive File", command=self.receive_file).grid(row=5, column=1)
     
     
     
@@ -227,9 +211,11 @@ class UDPApp:
             self.window.update()
         
         Thread(target=receive_file, args=(save_path, port)).start()
-        
+    def on_closing(self):
+        self.window.destroy()
+      
 if __name__ == "__main__":
     window = tk.Tk()
-    app = setup_gui(window)
+    app = UDPApp(window)
     window.protocol("WM_DELETE_WINDOW", app.on_closing)
     window.mainloop()
