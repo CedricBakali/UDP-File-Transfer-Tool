@@ -30,15 +30,16 @@ class UDPApp:
         self.entry_ip.insert(0, "127.0.0.1")
     
         tk.Label(self.window, text="Port:").grid(row=2, column=0)
-        self.entry_port = tk.Entry(self.window)
-        self.entry_port.grid(row=2, column=1)
-        self.entry_port.insert(0, "5000")
+        self.port_entry = tk.Entry(self.window)
+        self.port_entry.grid(row=2, column=1)
+        self.port_entry.insert(0, "5000")
     
         self.status_label = tk.Label(self.window, text="Ready")
         self.status_label.grid(row=3, column=0, columnspan=3)
     
-        tk.Button(self.window, text="Send File", command=self.send_file).grid(row=4, column=1)
-        tk.Button(self.window, text="Receive File", command=self.receive_file).grid(row=5, column=1)
+        tk.Button(self.window, text="Send File", command=self.on_send_click).grid(row=4, column=1)
+        tk.Button(self.window, text="Receive File", command=self.on_receive_click).grid(row=5, column=1)
+
     
         self.preview_label = tk.Label(self.window)
         self.preview_label.grid(row=2, column=0)
@@ -96,7 +97,7 @@ class UDPApp:
             return None
 
     #manages file transfer 
-    def send_file(file_path , receiver_ip , port):
+    def send_file(self, file_path , receiver_ip , port):
    
         sock = create_udp_socket()
         failed_chunks = []
@@ -115,15 +116,23 @@ class UDPApp:
 
 
 
-    def receive_file(self,save_path, port):
-        if not save_path:
+    def receive_file(self, save_path, port):
+
+        port = self.port_entry.get().strip()
+        save_path = filedialog.asksaveasfilename(defaultextension=".bin", title="Select Save Location")
+            
+        if not save_path:    
             self.update_status("Error: No save location selected")
             messagebox.showerror("Error", "Select a save location!")
             return
+        
+        
         if not self.validate_ip_port("0.0.0.0", port)[0]:
             self.update_status("Error: Invalid port")
             messagebox.showerror("Error", "Invalid port")
             return
+        
+        
         port = int(port)
         sock = self.create_udp_socket()
         sock.bind(("0.0.0.0", port))
@@ -211,14 +220,10 @@ class UDPApp:
     def on_send_click(self):
         file_path = self.entry_file.get()
         ip = self.entry_ip.get()
-        port = int(self.entry_port.get())
-        
-        def status_update(message):
-            self.status_label.config(text=message)
-            self.window.update()
-        
-        # Run in thread to avoid GUI freeze
-        Thread(target=send_file, args=(file_path, ip, port)).start()
+        port = int(self.port_entry.get())  # match the fixed name
+    
+        Thread(target=self.send_file, args=(file_path, ip, port)).start()
+
     
     def on_receive_click(self):
         save_path = filedialog.asksaveasfilename()
@@ -228,7 +233,14 @@ class UDPApp:
             self.status_label.config(text=message)
             self.window.update()
         
-        Thread(target=receive_file, args=(save_path, port)).start()
+        Thread(target=self._threaded_receive_file).start()
+
+    def _threaded_receive_file(self):
+        port = self.port_entry.get().strip()
+        save_path = filedialog.asksaveasfilename(defaultextension=".bin", title="Select Save Location")
+        self.receive_file(save_path, port)
+
+
     def on_closing(self):
         self.window.destroy()
       
