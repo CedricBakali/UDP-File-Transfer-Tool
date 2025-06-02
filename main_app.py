@@ -114,32 +114,43 @@ class UDPApp:
 
 
 
-    def receive_file(save_path, port, status_update=None):
-        sock = create_udp_socket()
+    def receive_file(self,save_path, port):
+        if not save_path:
+            self.update_status("Error: No save location selected")
+            messagebox.showerror("Error", "Select a save location!")
+            return
+        if not self.validate_ip_port("0.0.0.0", port)[0]:
+            self.update_status("Error: Invalid port")
+            messagebox.showerror("Error", "Invalid port")
+            return
+        port = int(port)
+        sock = self.create_udp_socket()
         sock.bind(("0.0.0.0", port))
         chunks = {}
-
-        if status_update:
-            status_update(f"Listening on port {port}...")
-
-        while True:
-            result = receive_chunk(sock)
-            if result is None:
-                break
-            seq_num, chunk, addr = result
+        self.update_status(f"Listening on port {port}...")
+        
+        while len(chunks) < 10000:  # Arbitrary limit to prevent infinite loop
+            seq_num, chunk, addr = self.receive_chunk(sock)
+            if seq_num is None:
+                continue
             chunks[seq_num] = chunk
-            if status_update:
-                status_update(f"Received chunk {seq_num} from {addr[0]}")
-
+            self.update_status(f"Received chunk {seq_num} from {addr[0]}")
+            # Simple completion check: assume transfer stops after 5s of no packets
+            sock.settimeout(5.0)
+            try:
+                sock.recvfrom(1024)
+            except socket.timeout:
+                break
+        
         sock.close()
-
         if chunks:
-            reassemble_file(chunks, save_path)
-            if status_update:
-                status_update(f"File saved as {os.path.basename(save_path)}")
+            self.reassemble_file(chunks, save_path)
+            received_checksum = self.generate_checksum(save_path)
+            self.update_status(f"File saved as {os.path.basename(save_path)}\nChecksum: {received_checksum[:8]}...")
+            messagebox.showinfo("Success", "File received successfully!")
         else:
-            if status_update:
-                status_update("No file received")
+            self.update_status("No file received")
+            messagebox.showwarning("Warning", "No file received")
 
 
     def split_file(file_path, chunk_size=1024):
@@ -165,11 +176,10 @@ class UDPApp:
 
 
 
-    def reassemble_file(chunks, output_path):
+    def reassemble_file(self, chunks, output_path):
         with open(output_path, 'wb') as file:
             for seq_num in sorted(chunks.keys()):
                 file.write(chunks[seq_num])
-
 
 
 
