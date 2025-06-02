@@ -3,6 +3,7 @@ import socket
 import os
 from tkinter import filedialog , messagebox
 from threading import Thread
+import hashlib
 
 
 class UDPApp:
@@ -168,10 +169,15 @@ class UDPApp:
         pass
 
     def validate_ack(ack_packet, expected_seq):
-        pass
+        try:
+            return ack_packet.decode() == f"ACK{expected_seq}"
+        except UnicodeDecodeError:
+            return False
 
     def log_error(error_msg):
-        pass
+        with open("error_log.txt", "a") as log_file:
+            log_file.write(f"{error_msg}\n")
+        print(f"Error: {error_msg}")
 
 
 
@@ -189,8 +195,11 @@ class UDPApp:
 
 
     def generate_checksum(file_path):
-    
-        pass
+        sha256 = hashlib.sha256()
+        with open(file_path, 'rb') as file:
+            for chunk in iter(lambda: file.read(4096), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
 
     def chunk_to_packet(seq_num, chunk):
         pass
