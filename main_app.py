@@ -1,7 +1,8 @@
 import tkinter as tk
 import socket
 import os
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox 
+from tkinter import ttk
 from threading import Thread
 import hashlib
 
@@ -20,6 +21,9 @@ class UDPApp:
 
         form_frame = tk.Frame(self.window, padx=20, pady=10)
         form_frame.pack(fill="both")
+        
+        frame = ttk.LabelFrame(window, text="Transfer Settings", padding=10)
+        frame.pack(padx=10, pady=10, fill="both", expand=True)
 
         tk.Label(form_frame, text="Select File:", font=("Arial", 12)).grid(row=0, column=0, sticky="e", pady=5)
         self.entry_file = tk.Entry(form_frame, width=40)
@@ -75,28 +79,38 @@ class UDPApp:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(3.0)
         return sock
+    
+    def chunk_to_packet(self, seq_num, chunk):
+        return f"{seq_num}:".encode() + chunk
 
     def send_chunk(self, sock, chunk, seq_num, receiver_ip, receiver_port, max_retries=3):
-        packet = f"{seq_num}:".encode() + chunk
-        for _ in range(max_retries):
+        packet = self.chunk_to_packet(seq_num, chunk)
+        for attempt in range(max_retries):
             try:
                 sock.sendto(packet, (receiver_ip, receiver_port))
-                ack, _ = sock.recvfrom(1024)
-                if ack.decode() == f"ACK:{seq_num}":
+                self.update_status(f"Sending chunk {seq_num} (Attempt {attempt + 1}/{max_retries})")
+                ack, _ = sock.recvfrom(1024)  # Line 84
+                if self.validate_ack(ack, seq_num):
                     return True
-            except socket.timeout:
+            except (socket.timeout, ConnectionResetError) as e:  # Add ConnectionResetError
+                self.log_error(f"Error on chunk {seq_num}, attempt {attempt + 1}: {e}")
                 continue
         return False
 
     def receive_chunk(self, sock):
         try:
             data, addr = sock.recvfrom(1024)
-            seq_num, chunk = data.split(b':', 1)
-            sock.sendto(f"ACK:{seq_num.decode()}".encode(), addr)
-            return int(seq_num), chunk, addr
-        except (socket.timeout, ValueError):
+            seq_num, chunk = self.packet_to_chunk(data)
+            if seq_num is not None:
+                sock.sendto(f"ACK:{seq_num}".encode(), addr)
+                self.update_status(f"Received chunk {seq_num} from {addr[0]}", (len(chunks) / 10000) * 100)
+                return seq_num, chunk, addr
+            self.log_error("Invalid packet received")
             return None, None, None
-
+        except socket.timeout:
+            self.log_error("No chunk received (timeout)")
+            return None, None, None
+    
     def send_file(self, file_path, receiver_ip, port):
         sock = self.create_udp_socket()
         failed_chunks = []
@@ -119,6 +133,18 @@ class UDPApp:
             messagebox.showerror("Error", "Invalid port")
             return
 
+        # Create destination folder if it doesn't exist
+        dest_folder = os.path.dirname(save_path)
+        if dest_folder:  # Only create if a directory is specified
+            try:
+                os.makedirs(dest_folder, exist_ok=True)
+            except OSError as e:
+                self.log_error(f"Error creating directory {dest_folder}: {e}")
+                self.update_status("Error: Cannot create destination folder")
+                messagebox.showerror("Error", f"Cannot create folder: {e}")
+                return
+        
+        
         port = int(port)
         sock = self.create_udp_socket()
         sock.bind(("0.0.0.0", port))
@@ -184,7 +210,9 @@ class UDPApp:
             self.receive_file(save_path, port)
 
     def on_receive_click(self):
-        Thread(target=self.send_file, args=(file_path, ip, int(port))).start()
+        save_path = filedialog.asksaveasfilename()
+        port = self.port_entry.get()
+        Thread(target=self.receive_file, args=(save_path, port)).start()
 
 
     def on_closing(self):
