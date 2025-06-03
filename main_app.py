@@ -22,7 +22,7 @@ class UDPApp:
         form_frame = tk.Frame(self.window, padx=20, pady=10)
         form_frame.pack(fill="both")
         
-        frame = ttk.LabelFrame(window, text="Transfer Settings", padding=10)
+        frame = ttk.LabelFrame(window, text="Transfer Info : ", padding=10)
         frame.pack(padx=10, pady=10, fill="both", expand=True)
 
         tk.Label(form_frame, text="Select File:", font=("Arial", 12)).grid(row=0, column=0, sticky="e", pady=5)
@@ -40,7 +40,7 @@ class UDPApp:
         self.port_entry.grid(row=2, column=1, pady=5)
         self.port_entry.insert(0, "5000")
 
-        self.preview_label = tk.Label(self.window, text="No file selected", font=("Arial", 10), fg="gray")
+        self.preview_label = tk.Label(frame, text="No file selected", font=("Arial", 10), fg="gray")
         self.preview_label.pack(pady=5)
 
         button_frame = tk.Frame(self.window, pady=10)
@@ -49,7 +49,7 @@ class UDPApp:
         tk.Button(button_frame, text="Send File", command=self.on_send_click, width=20, bg="#2196F3", fg="white").grid(row=0, column=0, padx=10)
         tk.Button(button_frame, text="Receive File", command=self.on_receive_click, width=20, bg="#FF5722", fg="white").grid(row=0, column=1, padx=10)
 
-        self.status_label = tk.Label(self.window, text="Status: Ready", font=("Arial", 10), fg="blue")
+        self.status_label = tk.Label(frame, text="Status: Ready", font=("Arial", 10), fg="blue")
         self.status_label.pack(pady=10)
 
     
@@ -67,6 +67,11 @@ class UDPApp:
         self.status_label.config(text=message)
         self.window.update()
 
+    def log_error(self, error_msg):
+        with open("error_log.txt", "a") as log_file:
+            log_file.write(f"{error_msg}\n")
+        print(f"Error: {error_msg}")
+    
     def validate_ip_port(self, ip, port):
         try:
             socket.inet_aton(ip)
@@ -79,6 +84,13 @@ class UDPApp:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(3.0)
         return sock
+    
+    def packet_to_chunk(self, packet):
+        try:
+            seq_num, chunk = packet.split(b':', 1)
+            return int(seq_num), chunk
+        except ValueError:
+            return None, None
     
     def chunk_to_packet(self, seq_num, chunk):
         return f"{seq_num}:".encode() + chunk
