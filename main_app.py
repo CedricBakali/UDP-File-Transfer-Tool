@@ -102,8 +102,9 @@ class UDPApp:
                 sock.sendto(packet, (receiver_ip, receiver_port))
                 self.update_status(f"Sending chunk {seq_num} (Attempt {attempt + 1}/{max_retries})")
                 ack, _ = sock.recvfrom(1024)  # Line 84
-                if self.validate_ack(ack, seq_num):
+                if ack.decode() == f"ACK:{seq_num}":
                     return True
+
             except (socket.timeout, ConnectionResetError) as e:  # Add ConnectionResetError
                 self.log_error(f"Error on chunk {seq_num}, attempt {attempt + 1}: {e}")
                 continue
@@ -115,7 +116,6 @@ class UDPApp:
             seq_num, chunk = self.packet_to_chunk(data)
             if seq_num is not None:
                 sock.sendto(f"ACK:{seq_num}".encode(), addr)
-                self.update_status(f"Received chunk {seq_num} from {addr[0]}", (len(chunks) / 10000) * 100)
                 return seq_num, chunk, addr
             self.log_error("Invalid packet received")
             return None, None, None
