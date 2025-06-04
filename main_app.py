@@ -38,7 +38,7 @@ class UDPApp:
         tk.Label(form_frame, text="Port:", font=("Arial", 12)).grid(row=2, column=0, sticky="e", pady=5)
         self.port_entry = tk.Entry(form_frame)
         self.port_entry.grid(row=2, column=1, pady=5)
-        self.port_entry.insert(0, "5000")
+        self.port_entry.insert(0, "5001")
 
         self.preview_label = tk.Label(frame, text="No file selected", font=("Arial", 10), fg="gray")
         self.preview_label.pack(pady=5)
@@ -51,6 +51,9 @@ class UDPApp:
 
         self.status_label = tk.Label(frame, text="Status: Ready", font=("Arial", 10), fg="blue")
         self.status_label.pack(pady=10)
+        
+        self.progress_bar = ttk.Progressbar(frame, orient="horizontal", length=400, mode="determinate")
+        self.progress_bar.pack(pady=10)
 
     
     
@@ -63,10 +66,13 @@ class UDPApp:
             file_size = round(os.path.getsize(file_path) / (1024 * 1024), 2)
             self.preview_label.config(text=f"Selected: {file_name}\nSize: {file_size} MB", fg="green")
 
-    def update_status(self, message):
+    def update_status(self, message, progress=None):
         self.status_label.config(text=message)
+        if progress is not None:
+            self.progress_bar["value"] = progress
         self.window.update()
-
+    
+    
     def log_error(self, error_msg):
         with open("error_log.txt", "a") as log_file:
             log_file.write(f"{error_msg}\n")
@@ -94,6 +100,12 @@ class UDPApp:
     
     def chunk_to_packet(self, seq_num, chunk):
         return f"{seq_num}:".encode() + chunk
+    
+    def validate_ack(self, ack_packet, expected_seq):
+        try:
+            return ack_packet.decode() == f"ACK:{expected_seq}"
+        except UnicodeDecodeError:
+            return False
 
     def send_chunk(self, sock, chunk, seq_num, receiver_ip, receiver_port, max_retries=3):
         packet = self.chunk_to_packet(seq_num, chunk)
@@ -101,11 +113,10 @@ class UDPApp:
             try:
                 sock.sendto(packet, (receiver_ip, receiver_port))
                 self.update_status(f"Sending chunk {seq_num} (Attempt {attempt + 1}/{max_retries})")
-                ack, _ = sock.recvfrom(1024)  # Line 84
-                if ack.decode() == f"ACK:{seq_num}":
+                ack, _ = sock.recvfrom(1024)
+                if self.validate_ack(ack, seq_num):
                     return True
-
-            except (socket.timeout, ConnectionResetError) as e:  # Add ConnectionResetError
+            except (socket.timeout, ConnectionResetError) as e:
                 self.log_error(f"Error on chunk {seq_num}, attempt {attempt + 1}: {e}")
                 continue
         return False
@@ -140,14 +151,17 @@ class UDPApp:
             self.update_status("File sent successfully!")
 
     def receive_file(self, save_path, port):
+        if not save_path:
+            self.update_status("Error: No save location selected")
+            messagebox.showerror("Error", "Select a save location!")
+            return
         if not self.validate_ip_port("0.0.0.0", port)[0]:
             self.update_status("Error: Invalid port")
             messagebox.showerror("Error", "Invalid port")
             return
-
-        # Create destination folder if it doesn't exist
+        port = int(port)
         dest_folder = os.path.dirname(save_path)
-        if dest_folder:  # Only create if a directory is specified
+        if dest_folder:
             try:
                 os.makedirs(dest_folder, exist_ok=True)
             except OSError as e:
@@ -155,41 +169,44 @@ class UDPApp:
                 self.update_status("Error: Cannot create destination folder")
                 messagebox.showerror("Error", f"Cannot create folder: {e}")
                 return
-        
-        
-        port = int(port)
         sock = self.create_udp_socket()
-        sock.bind(("0.0.0.0", port))
+        try:
+            sock.bind(("0.0.0.0", port))
+            self.update_status(f"Listening on port {port}...", 0)
+            self.progress_bar["value"] = 0  # Reset progress bar
+        except OSError as e:
+            self.log_error(f"Error binding to port {port}: {e}")
+            self.update_status(f"Error: Cannot bind to port {port}")
+            messagebox.showerror("Error", f"Cannot bind to port: {e}")
+            return
         chunks = {}
-        self.update_status(f"Listening on port {port}...")
-        print(f"Waiting on port {port}...")  # Confirm it's listening
-
-
-        while len(chunks) < 10000:
+        max_chunks = 10000
+        while len(chunks) < max_chunks:
             seq_num, chunk, addr = self.receive_chunk(sock)
             if seq_num is None:
                 print("No chunk received")
                 continue
-            print(f"Received chunk {seq_num} from {addr}")
             chunks[seq_num] = chunk
+            progress = min((len(chunks) / max_chunks) * 100, 100)
 
-            sock.settimeout(5.0)
-            try:
-                sock.recvfrom(1024)
-            except socket.timeout:
-                break
-
+            self.update_status(f"Received chunk {seq_num} from {addr[0]}", progress)
+            
         sock.close()
         if chunks:
-            self.reassemble_file(chunks, save_path)
-            received_checksum = self.generate_checksum(save_path)
-            self.update_status(f"File saved as {os.path.basename(save_path)}\nChecksum: {received_checksum[:8]}...")
-            messagebox.showinfo("Success", "File received successfully!")
+            try:
+                self.reassemble_file(chunks, save_path)
+                received_checksum = self.generate_checksum(save_path)
+                self.update_status(f"File saved as {os.path.basename(save_path)}\nChecksum: {received_checksum[:8]}...", 100)
+                messagebox.showinfo("Success", "File received successfully!")
+            except OSError as e:
+                self.log_error(f"Error saving file {save_path}: {e}")
+                self.update_status("Error: Cannot save file")
+                messagebox.showerror("Error", f"Cannot save file: {e}")
         else:
-            self.update_status("No file received")
+            self.update_status("No file received", 0)
             messagebox.showwarning("Warning", "No file received")
 
-    def split_file(self, file_path, chunk_size=1024):
+    def split_file(self, file_path, chunk_size=4096):
         with open(file_path, 'rb') as file:
             while True:
                 chunk = file.read(chunk_size)
