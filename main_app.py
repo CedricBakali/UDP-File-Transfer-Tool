@@ -2,9 +2,12 @@ import tkinter as tk
 import socket
 import os
 from tkinter import filedialog, messagebox 
+from tkinter import scrolledtext
 from tkinter import ttk
 from threading import Thread
 import hashlib
+import struct
+
 
 
 class UDPApp:
@@ -33,7 +36,7 @@ class UDPApp:
         tk.Label(form_frame, text="Receiver IP:", font=("Arial", 12)).grid(row=1, column=0, sticky="e", pady=5)
         self.entry_ip = tk.Entry(form_frame)
         self.entry_ip.grid(row=1, column=1, pady=5)
-        self.entry_ip.insert(0, "127.0.0.1")
+        self.entry_ip.insert(0, "192.168.245.224")
 
         tk.Label(form_frame, text="Port:", font=("Arial", 12)).grid(row=2, column=0, sticky="e", pady=5)
         self.port_entry = tk.Entry(form_frame)
@@ -49,12 +52,33 @@ class UDPApp:
         tk.Button(button_frame, text="Send File", command=self.on_send_click, width=20, bg="#2196F3", fg="white").grid(row=0, column=0, padx=10)
         tk.Button(button_frame, text="Receive File", command=self.on_receive_click, width=20, bg="#FF5722", fg="white").grid(row=0, column=1, padx=10)
 
-        self.status_label = tk.Label(frame, text="Status: Ready", font=("Arial", 10), fg="blue")
+       
+        
+        # Scrollable frame using canvas
+        canvas = tk.Canvas(self.window, height=200)
+        scroll_frame = ttk.LabelFrame(canvas, text="Transfer Info :", padding=10)
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        # Vertical scrollbar
+        vsb = tk.Scrollbar(self.window, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+
+        # Horizontal scrollbar
+        hsb = tk.Scrollbar(self.window, orient="horizontal", command=canvas.xview)
+        canvas.configure(xscrollcommand=hsb.set)
+
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        # Put the frame inside the canvas
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        self.status_label = tk.Label(scroll_frame, text="Status: Ready", font=("Arial", 10), fg="blue")
         self.status_label.pack(pady=10)
         
-        self.progress_bar = ttk.Progressbar(frame, orient="horizontal", length=400, mode="determinate")
+        self.progress_bar = ttk.Progressbar(scroll_frame, orient="horizontal", length=400, mode="determinate")
         self.progress_bar.pack(pady=10)
-
     
     
     def select_file(self):
@@ -88,18 +112,20 @@ class UDPApp:
 
     def create_udp_socket(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(3.0)
+        sock.settimeout(10.0)
         return sock
     
     def packet_to_chunk(self, packet):
-        try:
-            seq_num, chunk = packet.split(b':', 1)
-            return int(seq_num), chunk
-        except ValueError:
+        if len(packet)<4:
             return None, None
+        seq_num = struct.unpack("!I", packet[:4])[0]
+        chunk = packet[4:]
+        return seq_num , chunk
+
     
     def chunk_to_packet(self, seq_num, chunk):
-        return f"{seq_num}:".encode() + chunk
+        header = struct.pack("!I", seq_num)
+        return header + chunk
     
     def validate_ack(self, ack_packet, expected_seq):
         try:
@@ -113,7 +139,7 @@ class UDPApp:
             try:
                 sock.sendto(packet, (receiver_ip, receiver_port))
                 self.update_status(f"Sending chunk {seq_num} (Attempt {attempt + 1}/{max_retries})")
-                ack, _ = sock.recvfrom(1024)
+                ack, _ = sock.recvfrom(5000)
                 if self.validate_ack(ack, seq_num):
                     return True
             except (socket.timeout, ConnectionResetError) as e:
@@ -123,7 +149,7 @@ class UDPApp:
 
     def receive_chunk(self, sock):
         try:
-            data, addr = sock.recvfrom(1024)
+            data, addr = sock.recvfrom(5000)
             seq_num, chunk = self.packet_to_chunk(data)
             if seq_num is not None:
                 sock.sendto(f"ACK:{seq_num}".encode(), addr)
@@ -206,7 +232,7 @@ class UDPApp:
             self.update_status("No file received", 0)
             messagebox.showwarning("Warning", "No file received")
 
-    def split_file(self, file_path, chunk_size=4096):
+    def split_file(self, file_path, chunk_size=2048):
         with open(file_path, 'rb') as file:
             while True:
                 chunk = file.read(chunk_size)
@@ -222,7 +248,7 @@ class UDPApp:
     def generate_checksum(self, file_path):
         sha256 = hashlib.sha256()
         with open(file_path, 'rb') as file:
-            for chunk in iter(lambda: file.read(4096), b""):
+            for chunk in iter(lambda: file.read(1024), b""):
                 sha256.update(chunk)
         return sha256.hexdigest()
 
@@ -234,14 +260,14 @@ class UDPApp:
 
     def _threaded_receive_file(self):
         port = self.port_entry.get().strip()
-        save_path = filedialog.asksaveasfilename(defaultextension=".bin", title="Select Save Location")
-        if save_path:
+        selected_folder = filedialog.askdirectory(title="Select Folder to Save File")
+        if selected_folder:
+            save_path = os.path.join(selected_folder, "received_file.bin")
             self.receive_file(save_path, port)
 
     def on_receive_click(self):
-        save_path = filedialog.asksaveasfilename()
-        port = self.port_entry.get()
-        Thread(target=self.receive_file, args=(save_path, port)).start()
+        Thread(target=self._threaded_receive_file).start()
+
 
 
     def on_closing(self):
