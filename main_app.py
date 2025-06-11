@@ -1,13 +1,25 @@
 import tkinter as tk
 import socket
 import os
-from tkinter import filedialog, messagebox 
-from tkinter import scrolledtext
-from tkinter import ttk
-from threading import Thread
-import hashlib
 import struct
+import math
+import json
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+from threading import Thread
 
+
+PACKET_BUFFER_SIZE = 1472  # this is the best and common UDP payload size, it will enhance the UDP unreliability
+DATA_CHUNK_SIZE = 1024  # this is the size of the piece in each packet
+RECEIVER_IP = '0.0.0.0'  # this IP address helps to listen for all available interfaces
+DEFAULT_PORT = 5001
+SENDER_TIMEOUT_S = 2.0  # 2 seconds for the sender to wait for the acknowledgemnt rfom the receiver
+RECEIVER_TIMEOUT_S = 10.0  # the receiver will be giving up when the packet has not arrived in 10 secs
+
+# these are the protocol headers that will be using simple byte strings to identify packets types when sending and recieving
+META_HEADER = b'META'
+DATA_HEADER = b'DATA'
+EOF_HEADER = b'EOF'
+ACK_HEADER = b'ACK'
 
 
 class UDPApp:
@@ -17,31 +29,34 @@ class UDPApp:
         self.window.geometry("500x600")
         self.window.configure(bg="#f0f0f0")
         self.setup_gui()
+        self.sock = None  # this will hold the socket object
 
     def setup_gui(self):
-        title = tk.Label(self.window, text="UDP File Transfer Tool", font=("Helvetica", 18, "bold"), fg="white", bg="#333")
+        title = tk.Label(self.window, text="UDP File Transfer Tool", font=("Helvetica", 18, "bold"), fg="white",
+                         bg="#333")
         title.pack(fill="x", pady=10)
 
         form_frame = tk.Frame(self.window, padx=20, pady=10)
         form_frame.pack(fill="both")
-        
-        frame = ttk.LabelFrame(window, text="Transfer Info : ", padding=10)
+
+        frame = ttk.LabelFrame(self.window, text="Transfer Info : ", padding=10)
         frame.pack(padx=10, pady=10, fill="both", expand=True)
 
         tk.Label(form_frame, text="Select File:", font=("Arial", 12)).grid(row=0, column=0, sticky="e", pady=5)
         self.entry_file = tk.Entry(form_frame, width=40)
         self.entry_file.grid(row=0, column=1, pady=5)
-        tk.Button(form_frame, text="Browse", command=self.select_file, bg="#4CAF50", fg="white").grid(row=0, column=2, padx=5)
+        tk.Button(form_frame, text="Browse", command=self.select_file, bg="#4CAF50", fg="white").grid(row=0, column=2,
+                                                                                                      padx=5)
 
         tk.Label(form_frame, text="Receiver IP:", font=("Arial", 12)).grid(row=1, column=0, sticky="e", pady=5)
         self.entry_ip = tk.Entry(form_frame)
         self.entry_ip.grid(row=1, column=1, pady=5)
-        self.entry_ip.insert(0, "192.168.245.224")
+        self.entry_ip.insert(0, "0.0.0.0")
 
         tk.Label(form_frame, text="Port:", font=("Arial", 12)).grid(row=2, column=0, sticky="e", pady=5)
         self.port_entry = tk.Entry(form_frame)
         self.port_entry.grid(row=2, column=1, pady=5)
-        self.port_entry.insert(0, "5001")
+        self.port_entry.insert(0, str(DEFAULT_PORT))
 
         self.preview_label = tk.Label(frame, text="No file selected", font=("Arial", 10), fg="gray")
         self.preview_label.pack(pady=5)
@@ -49,228 +64,230 @@ class UDPApp:
         button_frame = tk.Frame(self.window, pady=10)
         button_frame.pack()
 
-        tk.Button(button_frame, text="Send File", command=self.on_send_click, width=20, bg="#2196F3", fg="white").grid(row=0, column=0, padx=10)
-        tk.Button(button_frame, text="Receive File", command=self.on_receive_click, width=20, bg="#FF5722", fg="white").grid(row=0, column=1, padx=10)
+        self.send_button = tk.Button(button_frame, text="Send File", command=self.on_send_click, width=20, bg="#2196F3",fg="white")
+        self.send_button.grid(row=0, column=0, padx=10)
 
-       
-        
-        # Scrollable frame using canvas
-        canvas = tk.Canvas(self.window, height=200)
-        scroll_frame = ttk.LabelFrame(canvas, text="Transfer Info :", padding=10)
-        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        self.receive_button = tk.Button(button_frame, text="Receive File", command=self.on_receive_click, width=20,bg="#FF5722", fg="white")
+        self.receive_button.grid(row=0, column=1, padx=10)
 
-        # Vertical scrollbar
-        vsb = tk.Scrollbar(self.window, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
+        # using simple status frame
+        status_container = ttk.LabelFrame(self.window, text="Transfer Status", padding=10)
+        status_container.pack(padx=10, pady=10, fill="both", expand=True)
 
-        # Horizontal scrollbar
-        hsb = tk.Scrollbar(self.window, orient="horizontal", command=canvas.xview)
-        canvas.configure(xscrollcommand=hsb.set)
+        self.status_label = tk.Label(status_container, text="Status: Ready", font=("Arial", 10), fg="blue", anchor='w')
+        self.status_label.pack(pady=5, fill='x')
 
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
-        canvas.pack(side="left", fill="both", expand=True)
+        self.progress_bar = ttk.Progressbar(status_container, orient="horizontal", length=400, mode="determinate")
+        self.progress_bar.pack(pady=10, fill='x')
 
-        # Put the frame inside the canvas
-        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+    def update_ui_state(self, is_active):
+        #disable/enable ui element during transferring
+        state = tk.DISABLED if is_active else tk.NORMAL
+        self.send_button.config(state=state)
+        self.receive_button.config(state=state)
+        for child in self.window.winfo_children():
+            if isinstance(child, tk.Frame):
+                for widget in child.winfo_children():
+                    if isinstance(widget, (tk.Entry, tk.Button)) and widget not in [self.send_button,self.receive_button]:widget.config(state=state)
 
-        self.status_label = tk.Label(scroll_frame, text="Status: Ready", font=("Arial", 10), fg="blue")
-        self.status_label.pack(pady=10)
-        
-        self.progress_bar = ttk.Progressbar(scroll_frame, orient="horizontal", length=400, mode="determinate")
-        self.progress_bar.pack(pady=10)
-    
-    
     def select_file(self):
         file_path = filedialog.askopenfilename()
         if file_path:
             self.entry_file.delete(0, tk.END)
             self.entry_file.insert(0, file_path)
             file_name = os.path.basename(file_path)
-            file_size = round(os.path.getsize(file_path) / (1024 * 1024), 2)
-            self.preview_label.config(text=f"Selected: {file_name}\nSize: {file_size} MB", fg="green")
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            self.preview_label.config(text=f"Selected: {file_name}\nSize: {file_size_mb:.2f} MB", fg="green")
 
     def update_status(self, message, progress=None):
-        self.status_label.config(text=message)
-        if progress is not None:
-            self.progress_bar["value"] = progress
-        self.window.update()
-    
-    
-    def log_error(self, error_msg):
-        with open("error_log.txt", "a") as log_file:
-            log_file.write(f"{error_msg}\n")
-        print(f"Error: {error_msg}")
-    
-    def validate_ip_port(self, ip, port):
-        try:
-            socket.inet_aton(ip)
-            port = int(port)
-            return True, port
-        except:
-            return False, None
+        def _update():
+            self.status_label.config(text=message)
+            if progress is not None:
+                self.progress_bar["value"] = progress
+            self.window.update_idletasks()
 
-    def create_udp_socket(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(10.0)
-        return sock
-    
-    def packet_to_chunk(self, packet):
-        if len(packet)<4:
-            return None, None
-        seq_num = struct.unpack("!I", packet[:4])[0]
-        chunk = packet[4:]
-        return seq_num , chunk
-
-    
-    def chunk_to_packet(self, seq_num, chunk):
-        header = struct.pack("!I", seq_num)
-        return header + chunk
-    
-    def validate_ack(self, ack_packet, expected_seq):
-        try:
-            return ack_packet.decode() == f"ACK:{expected_seq}"
-        except UnicodeDecodeError:
-            return False
-
-    def send_chunk(self, sock, chunk, seq_num, receiver_ip, receiver_port, max_retries=3):
-        packet = self.chunk_to_packet(seq_num, chunk)
-        for attempt in range(max_retries):
-            try:
-                sock.sendto(packet, (receiver_ip, receiver_port))
-                self.update_status(f"Sending chunk {seq_num} (Attempt {attempt + 1}/{max_retries})")
-                ack, _ = sock.recvfrom(5000)
-                if self.validate_ack(ack, seq_num):
-                    return True
-            except (socket.timeout, ConnectionResetError) as e:
-                self.log_error(f"Error on chunk {seq_num}, attempt {attempt + 1}: {e}")
-                continue
-        return False
-
-    def receive_chunk(self, sock):
-        try:
-            data, addr = sock.recvfrom(5000)
-            seq_num, chunk = self.packet_to_chunk(data)
-            if seq_num is not None:
-                sock.sendto(f"ACK:{seq_num}".encode(), addr)
-                return seq_num, chunk, addr
-            self.log_error("Invalid packet received")
-            return None, None, None
-        except socket.timeout:
-            self.log_error("No chunk received (timeout)")
-            return None, None, None
-    
-    def send_file(self, file_path, receiver_ip, port):
-        sock = self.create_udp_socket()
-        failed_chunks = []
-
-        for seq_num, chunk in enumerate(self.split_file(file_path)):
-            print(f"Sending chunk {seq_num}, size: {len(chunk)}")
-            if not self.send_chunk(sock, chunk, seq_num, receiver_ip, port):
-                failed_chunks.append(seq_num)
-
-
-        sock.close()
-        if failed_chunks:
-            self.update_status(f"Failed chunks: {failed_chunks}")
-        else:
-            self.update_status("File sent successfully!")
-
-    def receive_file(self, save_path, port):
-        if not save_path:
-            self.update_status("Error: No save location selected")
-            messagebox.showerror("Error", "Select a save location!")
-            return
-        if not self.validate_ip_port("0.0.0.0", port)[0]:
-            self.update_status("Error: Invalid port")
-            messagebox.showerror("Error", "Invalid port")
-            return
-        port = int(port)
-        dest_folder = os.path.dirname(save_path)
-        if dest_folder:
-            try:
-                os.makedirs(dest_folder, exist_ok=True)
-            except OSError as e:
-                self.log_error(f"Error creating directory {dest_folder}: {e}")
-                self.update_status("Error: Cannot create destination folder")
-                messagebox.showerror("Error", f"Cannot create folder: {e}")
-                return
-        sock = self.create_udp_socket()
-        try:
-            sock.bind(("0.0.0.0", port))
-            self.update_status(f"Listening on port {port}...", 0)
-            self.progress_bar["value"] = 0  # Reset progress bar
-        except OSError as e:
-            self.log_error(f"Error binding to port {port}: {e}")
-            self.update_status(f"Error: Cannot bind to port {port}")
-            messagebox.showerror("Error", f"Cannot bind to port: {e}")
-            return
-        chunks = {}
-        max_chunks = 10000
-        while len(chunks) < max_chunks:
-            seq_num, chunk, addr = self.receive_chunk(sock)
-            if seq_num is None:
-                print("No chunk received")
-                continue
-            chunks[seq_num] = chunk
-            progress = min((len(chunks) / max_chunks) * 100, 100)
-
-            self.update_status(f"Received chunk {seq_num} from {addr[0]}", progress)
-            
-        sock.close()
-        if chunks:
-            try:
-                self.reassemble_file(chunks, save_path)
-                received_checksum = self.generate_checksum(save_path)
-                self.update_status(f"File saved as {os.path.basename(save_path)}\nChecksum: {received_checksum[:8]}...", 100)
-                messagebox.showinfo("Success", "File received successfully!")
-            except OSError as e:
-                self.log_error(f"Error saving file {save_path}: {e}")
-                self.update_status("Error: Cannot save file")
-                messagebox.showerror("Error", f"Cannot save file: {e}")
-        else:
-            self.update_status("No file received", 0)
-            messagebox.showwarning("Warning", "No file received")
-
-    def split_file(self, file_path, chunk_size=2048):
-        with open(file_path, 'rb') as file:
-            while True:
-                chunk = file.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-
-    def reassemble_file(self, chunks, output_path):
-        with open(output_path, 'wb') as file:
-            for seq_num in sorted(chunks.keys()):
-                file.write(chunks[seq_num])
-
-    def generate_checksum(self, file_path):
-        sha256 = hashlib.sha256()
-        with open(file_path, 'rb') as file:
-            for chunk in iter(lambda: file.read(1024), b""):
-                sha256.update(chunk)
-        return sha256.hexdigest()
+        # updates must be made after the main thread
+        self.window.after(0, _update)
 
     def on_send_click(self):
         file_path = self.entry_file.get()
-        ip = self.entry_ip.get()
-        port = self.port_entry.get()
-        Thread(target=self.send_file, args=(file_path, ip, int(port))).start()
+        if not file_path or not os.path.exists(file_path):
+            messagebox.showerror("Error", "Please select a valid file to send.")
+            return
 
-    def _threaded_receive_file(self):
-        port = self.port_entry.get().strip()
-        selected_folder = filedialog.askdirectory(title="Select Folder to Save File")
-        if selected_folder:
-            save_path = os.path.join(selected_folder, "received_file.bin")
-            self.receive_file(save_path, port)
+        receiver_ip = self.entry_ip.get()
+        try:
+            port = int(self.port_entry.get())
+            if not (1024 < port < 65535):
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "Invalid Port. Must be a number between 1025 and 65534.")
+            return
+
+        # disabling the UI and start the send thread
+        self.update_ui_state(is_active=True)
+        Thread(target=self.send_file_threaded, args=(file_path, receiver_ip, port), daemon=True).start()
 
     def on_receive_click(self):
-        Thread(target=self._threaded_receive_file).start()
+        try:
+            port = int(self.port_entry.get())
+            if not (1024 < port < 65535):
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "Invalid Port. Must be a number between 1025 and 65534.")
+            return
 
+        save_dir = filedialog.askdirectory(title="Select Folder to Save Received File")
+        if not save_dir:
+            return
 
+        # disabling the UI and start the receive thread
+        self.update_ui_state(is_active=True)
+        Thread(target=self.receive_file_threaded, args=(port, save_dir), daemon=True).start()
+
+    def send_with_retry(self, sock, data, addr, expected_ack, max_retries=5):
+        #send packets and wait for acknowledgements
+        for attempt in range(max_retries):
+            try:
+                sock.sendto(data, addr)
+                ack_packet, _ = sock.recvfrom(PACKET_BUFFER_SIZE)
+                if ack_packet == expected_ack:
+                    return True
+                else:
+                    self.update_status(f"Warning: Received wrong ACK. Retrying... (Attempt {attempt + 1})")
+            except socket.timeout:
+                self.update_status(f"Warning: ACK timeout. Retrying... (Attempt {attempt + 1})")
+        return False
+
+    def send_file_threaded(self, file_path, receiver_ip, port):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.settimeout(SENDER_TIMEOUT_S)
+
+            filename = os.path.basename(file_path)
+            filesize = os.path.getsize(file_path)
+            total_chunks = math.ceil(filesize / DATA_CHUNK_SIZE)
+
+            self.update_status(f"Contacting receiver at {receiver_ip}:{port}...")
+
+            # sending metadata
+            metadata = {'filename': filename, 'filesize': filesize, 'total_chunks': total_chunks}
+            meta_packet = META_HEADER + json.dumps(metadata).encode('utf-8')
+
+            if not self.send_with_retry(self.sock, meta_packet, (receiver_ip, port), ACK_HEADER + META_HEADER):
+                raise ConnectionError("Receiver did not acknowledge metadata. Aborting.")
+
+            # sending file data
+            self.update_status(f"Starting file transfer of '{filename}'...")
+            with open(file_path, 'rb') as f:
+                for seq_num in range(total_chunks):
+                    chunk = f.read(DATA_CHUNK_SIZE)
+                    # packet format: DATA_HEADER | seq_num (4 bytes) | chunk_data
+                    packet = DATA_HEADER + struct.pack('!I', seq_num) + chunk
+
+                    # expected acknowledegements with the format: ack header | sequence number in 4 bytes
+                    expected_ack = ACK_HEADER + struct.pack('!I', seq_num)
+
+                    if not self.send_with_retry(self.sock, packet, (receiver_ip, port), expected_ack):
+                        raise ConnectionError(f"Failed to get ACK for chunk {seq_num}. Aborting.")
+
+                    progress = (seq_num + 1) / total_chunks * 100
+                    self.update_status(f"Sending chunk {seq_num + 1}/{total_chunks}...", progress)
+
+            # sending the End Of File Marker to the receiver
+            self.update_status("Finalizing transfer...")
+            if not self.send_with_retry(self.sock, EOF_HEADER, (receiver_ip, port), ACK_HEADER + EOF_HEADER):
+                raise ConnectionError("Receiver did not acknowledge EOF. Transfer may be incomplete.")
+
+            self.update_status(f"File '{filename}' sent successfully!", 100)
+            messagebox.showinfo("Success", "File transfer complete.")
+
+        except Exception as e:
+            self.update_status(f"Error: {e}", 0)
+            messagebox.showerror("Transfer Failed", f"An error occurred: {e}")
+        finally:
+            if self.sock:
+                self.sock.close()
+            self.update_ui_state(is_active=False)
+
+    def receive_file_threaded(self, port, save_dir):
+        chunks = {}
+        metadata = None
+        sender_addr = None
+
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.bind((RECEIVER_IP, port))
+            self.update_status(f"Listening on port {port}...")
+
+            # receiving metadata
+            self.sock.settimeout(None)  # waiting for no timeout for the first data
+            meta_packet, sender_addr = self.sock.recvfrom(PACKET_BUFFER_SIZE)
+
+            if not meta_packet.startswith(META_HEADER):
+                raise ConnectionError("Received invalid first packet. Not metadata.")
+
+            metadata = json.loads(meta_packet[len(META_HEADER):].decode('utf-8'))
+            total_chunks = metadata['total_chunks']
+            filename = metadata['filename']
+            save_path = os.path.join(save_dir, filename)
+
+            self.update_status(f"Receiving '{filename}' ({total_chunks} chunks) from {sender_addr[0]}...")
+            self.sock.sendto(ACK_HEADER + META_HEADER, sender_addr)  # acknowledgements for metadata
+
+            # start receieving file data
+            self.sock.settimeout(RECEIVER_TIMEOUT_S)  # setting timeouts for packets
+
+            while len(chunks) < total_chunks:
+                packet, addr = self.sock.recvfrom(PACKET_BUFFER_SIZE)
+
+                if addr != sender_addr: continue  # for security reasons, this line will be ignoring packets from other sources
+
+                if packet.startswith(DATA_HEADER):
+                    header = packet[:len(DATA_HEADER) + 4]
+                    data = packet[len(DATA_HEADER) + 4:]
+                    seq_num = struct.unpack('!I', header[len(DATA_HEADER):])[0]
+
+                    if seq_num not in chunks:
+                        chunks[seq_num] = data
+                        progress = len(chunks) / total_chunks * 100
+                        self.update_status(f"Received chunk {seq_num + 1}/{total_chunks}...", progress)
+
+                    # this part will be sending acknowledgements to the sender to make sure each chunk sent has been received even with duplicated chunks
+                    ack_packet = ACK_HEADER + struct.pack('!I', seq_num)
+                    self.sock.sendto(ack_packet, sender_addr)
+
+                elif packet == EOF_HEADER:
+                    self.update_status("EOF signal received.")
+                    self.sock.sendto(ACK_HEADER + EOF_HEADER, sender_addr)
+                    break
+
+            # this part will be reassembling the collected chunks
+            if len(chunks) == total_chunks:
+                self.update_status(f"All chunks received. Assembling file...", 100)
+                with open(save_path, 'wb') as f:
+                    for i in range(total_chunks):
+                        f.write(chunks[i])
+
+                self.update_status(f"File successfully saved as '{filename}'!", 100)
+                messagebox.showinfo("Success", f"File received and saved to:\n{save_path}")
+            else:
+                raise ConnectionError(f"Transfer incomplete. Received {len(chunks)}/{total_chunks} chunks.")
+
+        except socket.timeout:
+            self.update_status("Error: Timed out waiting for packet.", 0)
+            messagebox.showerror("Error", "Receiver timed out. The sender may have disconnected.")
+        except Exception as e:
+            self.update_status(f"Error: {e}", 0)
+            messagebox.showerror("Transfer Failed", f"An error occurred: {e}")
+        finally:
+            if self.sock:
+                self.sock.close()
+            self.update_ui_state(is_active=False)
 
     def on_closing(self):
+        if self.sock:
+            self.sock.close()
         self.window.destroy()
 
 
